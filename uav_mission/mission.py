@@ -8,11 +8,24 @@ class MissionNode(Node):
     def __init__(self):
         super().__init__('mission_node')
         
+        # Declare and get namespace parameter for UAV topics
+        self.declare_parameter('uav_namespace', '')
+        self.uav_namespace = self.get_parameter('uav_namespace').value
+        
+        if self.uav_namespace:
+            self.get_logger().info(f'Using UAV namespace: {self.uav_namespace}')
+        else:
+            self.get_logger().info('Using default UAV namespace (no prefix)')
+        
+        # Build topic names with namespace
+        mission_cmd_topic = self._build_uav_topic('/mission_cmd')
+        mission_state_topic = self._build_uav_topic('/mission_state')
+        
         # Publishers e Subscribers
-        self.mission_cmd_pub = self.create_publisher(MissionCommand, '/mission_cmd', 10)
+        self.mission_cmd_pub = self.create_publisher(MissionCommand, mission_cmd_topic, 10)
         self.mission_status_sub = self.create_subscription(
             MissionState, 
-            '/mission_state', 
+            mission_state_topic, 
             self.mission_status_callback, 
             10
         )
@@ -29,7 +42,13 @@ class MissionNode(Node):
             {"command": "HOLD"},
             {"command": "GOTO", "x": 2.0, "y": -1.0, "z": 2.0},
             {"command": "HOLD"},
-            {"command": "GOTO", "x": 3.0, "y": -4.0, "z": 5.0},
+            {"command": "LAND"},
+            {"command": "DISARM"},
+            {"command": "OFFBOARD"},
+            {"command" : "ARM"},
+            {"command": "TAKEOFF"},
+            {"command": "HOLD"},
+            {"command": "GOTO", "x": 4.0, "y": -2.0, "z": 2.0},
             {"command": "HOLD"},
             {"command": "LAND"},
             {"command": "DISARM"}
@@ -38,6 +57,12 @@ class MissionNode(Node):
         # Inicia a missão
         self.get_logger().info("Mission Node iniciado. Começando missão...")
         self.send_next_command()
+
+    def _build_uav_topic(self, uav_topic):
+        """Build complete topic name with namespace prefix for UAV topics."""
+        if self.uav_namespace:
+            return f"{self.uav_namespace}{uav_topic}"
+        return uav_topic
 
     def create_mission_command(self, command_dict):
         """Cria uma mensagem MissionCommand a partir do dicionário"""
