@@ -4,6 +4,26 @@ import time
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import String
 from uav_interfaces.msg import MissionCommand, MissionState
+from uav_interfaces.srv import VehicleCommander, SetpointControl
+
+# Gesture to velocity command mapping
+GESTURE_TO_VELOCITY = {
+    "forward":   {"vx": 0.3, "vy": 0.0, "vz": 0.0, "yaw": 0.0},
+    "back":      {"vx": -0.3, "vy": 0.0, "vz": 0.0, "yaw": 0.0},
+    "left":      {"vx": 0.0, "vy": -0.3, "vz": 0.0, "yaw": 0.0},
+    "right":     {"vx": 0.0, "vy": 0.3, "vz": 0.0, "yaw": 0.0},
+    "up":        {"vx": 0.0, "vy": 0.0, "vz": -0.6, "yaw": 0.0},
+    "down":      {"vx": 0.0, "vy": 0.0, "vz": 0.3, "yaw": 0.0},
+    "hold":      {"vx": 0.0, "vy": 0.0, "vz": 0.0, "yaw": 0.0},
+}
+
+# Gesture to action mapping 
+GESTURE_TO_ACTION = {
+    "land":          ("land",          {}),
+    "return":        ("return",        {}),
+    "arm":           ("arm",           {}),
+    "disarm":        ("disarm",        {}),
+}
 
 class GestureControlledMissionNode(Node):
     def __init__(self):
@@ -39,9 +59,20 @@ class GestureControlledMissionNode(Node):
             10
         )
 
+        # Service clients for velocity control
+        self.cmd_cli = self.create_client(VehicleCommander, 'vehicle_commander')
+        self.setpoint_cli = self.create_client(SetpointControl, 'setpoint_controller')
+        
+        # Wait for services to be available
+        self.cmd_cli.wait_for_service()
+        self.setpoint_cli.wait_for_service()
+
         # Mission control variables (similar to fase1)
         self.waiting_for_response = False
         self.current_command = None
+        
+        # Gesture control
+        self.last_gesture = None
         
         # UAV state tracking
         self.is_armed = False
@@ -50,8 +81,8 @@ class GestureControlledMissionNode(Node):
         self.current_position = {"x": 0.0, "y": 0.0, "z": 0.0}
         
         # Movement parameters
-        self.step_size = 1.0  # meters
-        self.altitude_step = 0.5  # meters
+        self.step_size = 1.0  # Movimento horizontal 
+        self.altitude_step = 0.5  # Movimento vertical
         self.max_altitude = 4.0  # meters
         self.min_altitude = 0.5  # meters
         
@@ -60,14 +91,13 @@ class GestureControlledMissionNode(Node):
         self.takeoff_step = 0  # 0: OFFBOARD, 1: ARM, 2: TAKEOFF
         
         self.get_logger().info("=== GESTURE CONTROLLED MISSION NODE ===")
-        self.get_logger().info("Integrado com FlightManagerNode")
+        self.get_logger().info("Integrado com FlightManagerNode e serviços de velocidade")
         self.get_logger().info("Comandos disponíveis:")
         self.get_logger().info("- takeoff: Sequência completa de decolagem")
-        self.get_logger().info("- land: Pousar e desarmar")
-        self.get_logger().info("- hold: Manter posição atual")
-        self.get_logger().info("- forward/back/left/right: Movimento (1m)")
-        self.get_logger().info("- up/down: Altitude (0.5m)")
-        self.get_logger().info("- return: Voltar para origem (0,0,2)")
+        self.get_logger().info("- forward/back/left/right: Movimento com velocidade")
+        self.get_logger().info("- up/down: Altitude com velocidade")
+        self.get_logger().info("- hold: Parar movimento")
+        self.get_logger().info("- land/return/arm/disarm: Comandos de veículo")
         self.get_logger().info("=========================================")
 
     def _build_uav_topic(self, uav_topic):
@@ -102,6 +132,28 @@ class GestureControlledMissionNode(Node):
         
         return msg
 
+    def send_velocity_setpoint(self, cmd):
+        """Send velocity setpoint command"""
+        req = SetpointControl.Request()
+        req.type = 'vel'
+        req.vx = cmd["vx"]
+        req.vy = cmd["vy"]
+        req.vz = cmd["vz"]
+        req.yaw = cmd["yaw"]
+        
+        self.get_logger().info(f"Enviando comando de velocidade: vx={cmd['vx']:.1f}, vy={cmd['vy']:.1f}, vz={cmd['vz']:.1f}, yaw={cmd['yaw']:.1f}")
+        self.setpoint_cli.call_async(req)
+
+    def send_vehicle_command(self, command, **kwargs):
+        """Send vehicle command"""
+        req = VehicleCommander.Request()
+        req.command = command
+        req.mode = kwargs.get('mode', "")
+        req.param1 = float(kwargs.get('param1', 0.0))
+        
+        self.get_logger().info(f"Enviando comando de veículo: {command}")
+        self.cmd_cli.call_async(req)
+
     def send_mission_command(self, command_dict):
         """Send mission command to FlightManagerNode """
         if self.waiting_for_response:
@@ -134,35 +186,25 @@ class GestureControlledMissionNode(Node):
         if not gesture:
             return
             
-        self.get_logger().info(f"🤲 Gesto detectado: {gesture}")
+        # Avoid continuous repetition
+        if gesture == self.last_gesture:
+            return
+            
+        self.last_gesture = gesture
+        self.get_logger().info(f" Gesto detectado: {gesture}")
         
-        # Handle takeoff sequence
+        # Handle takeoff sequence (keep existing logic)
         if gesture == "takeoff":
             self.handle_takeoff_gesture()
-        elif gesture == "land":
-            self.handle_land_gesture()
-        elif gesture == "hold":
-            self.handle_hold_gesture()
-        elif self.is_flying and self.gesture_mode_active:
-            # Movement commands only when flying
-            if gesture == "forward":
-                self.handle_movement_gesture("forward")
-            elif gesture == "back":
-                self.handle_movement_gesture("back")
-            elif gesture == "left":
-                self.handle_movement_gesture("left")
-            elif gesture == "right":
-                self.handle_movement_gesture("right")
-            elif gesture == "up":
-                self.handle_movement_gesture("up")
-            elif gesture == "down":
-                self.handle_movement_gesture("down")
-            elif gesture == "return":
-                self.handle_return_gesture()
-            else:
-                self.get_logger().warn(f"Gesto não reconhecido: {gesture}")
+        # Handle velocity commands 
+        elif gesture in GESTURE_TO_VELOCITY and self.is_flying and self.gesture_mode_active:
+            self.send_velocity_setpoint(GESTURE_TO_VELOCITY[gesture])
+        # Handle vehicle commands
+        elif gesture in GESTURE_TO_ACTION and self.is_flying:
+            command, kwargs = GESTURE_TO_ACTION[gesture]
+            self.send_vehicle_command(command, **kwargs)
         else:
-            if gesture not in ["takeoff", "land", "hold"]:
+            if gesture not in ["takeoff"]:
                 self.get_logger().info(f"Gesto {gesture} ignorado - UAV não está voando ou modo gesture inativo")
 
     def handle_takeoff_gesture(self):
@@ -175,88 +217,13 @@ class GestureControlledMissionNode(Node):
             # Start takeoff sequence
             self.takeoff_sequence_active = True
             self.takeoff_step = 0
-            self.get_logger().info("🚀 Iniciando sequência de decolagem por gesto...")
+            self.get_logger().info(" Iniciando sequência de decolagem por gesto...")
             
             # Step 1: OFFBOARD
             command = {"command": "OFFBOARD"}
             self.send_mission_command(command)
         else:
             self.get_logger().info("Sequência de decolagem já em andamento...")
-
-    def handle_land_gesture(self):
-        """Handle landing sequence"""
-        if not self.is_flying:
-            self.get_logger().warn("UAV não está voando!")
-            return
-            
-        self.get_logger().info("🛬 Iniciando pouso por gesto...")
-        command = {"command": "LAND"}
-        self.send_mission_command(command)
-
-    def handle_hold_gesture(self):
-        """Handle hold position command"""
-        if not self.is_flying:
-            self.get_logger().warn("UAV não está voando!")
-            return
-            
-        self.get_logger().info("✋ Mantendo posição por gesto...")
-        command = {
-            "command": "HOLD",
-            "x": self.current_position["x"],
-            "y": self.current_position["y"],
-            "z": self.current_position["z"]
-        }
-        self.send_mission_command(command)
-
-    def handle_movement_gesture(self, direction):
-        """Handle movement gestures"""
-        if not self.is_flying or not self.gesture_mode_active:
-            self.get_logger().warn("Movimento ignorado - UAV não está em modo gesture ativo")
-            return
-            
-        # Calculate new position based on direction
-        new_x = self.current_position["x"]
-        new_y = self.current_position["y"]
-        new_z = self.current_position["z"]
-        
-        if direction == "forward":
-            new_x += self.step_size
-            self.get_logger().info(f"⬆️ Movendo para frente ({self.step_size}m)")
-        elif direction == "back":
-            new_x -= self.step_size
-            self.get_logger().info(f"⬇️ Movendo para trás ({self.step_size}m)")
-        elif direction == "left":
-            new_y += self.step_size
-            self.get_logger().info(f"⬅️ Movendo para esquerda ({self.step_size}m)")
-        elif direction == "right":
-            new_y -= self.step_size
-            self.get_logger().info(f"➡️ Movendo para direita ({self.step_size}m)")
-        elif direction == "up":
-            new_z = min(new_z + self.altitude_step, self.max_altitude)
-            self.get_logger().info(f"⬆️ Subindo ({self.altitude_step}m) - Max: {self.max_altitude}m")
-        elif direction == "down":
-            new_z = max(new_z - self.altitude_step, self.min_altitude)
-            self.get_logger().info(f"⬇️ Descendo ({self.altitude_step}m) - Min: {self.min_altitude}m")
-            
-        # Send GOTO command
-        command = {
-            "command": "GOTO",
-            "x": new_x,
-            "y": new_y,
-            "z": new_z
-        }
-        self.send_mission_command(command)
-
-    def handle_return_gesture(self):
-        """Handle return to origin gesture"""
-        self.get_logger().info("🏠 Retornando para origem por gesto...")
-        command = {
-            "command": "GOTO",
-            "x": 0.0,
-            "y": 0.0,
-            "z": 2.0
-        }
-        self.send_mission_command(command)
 
     def mission_status_callback(self, msg: MissionState):
         """Handle mission status updates from FlightManagerNode (same pattern as fase1)"""
@@ -286,15 +253,7 @@ class GestureControlledMissionNode(Node):
             elif command_name == "DISARM":
                 self.is_armed = False
                 self.get_logger().info("Modo de controle por gestos DESATIVADO!")
-                
-            elif command_name == "GOTO":
-                # Update current position after successful movement
-                if self.current_command:
-                    self.current_position["x"] = self.current_command.get("x", self.current_position["x"])
-                    self.current_position["y"] = self.current_command.get("y", self.current_position["y"])
-                    self.current_position["z"] = self.current_command.get("z", self.current_position["z"])
-                    self.get_logger().info(f"Posição atualizada: ({self.current_position['x']:.1f}, {self.current_position['y']:.1f}, {self.current_position['z']:.1f})")
-                    
+
         elif msg.status == "FAILED":
             self.get_logger().error(f"Comando {command_name} falhou: {msg.info}")
             self.waiting_for_response = False
@@ -329,12 +288,12 @@ class GestureControlledMissionNode(Node):
             self.is_flying = True
             self.gesture_mode_active = True
             self.current_position = {"x": 0.0, "y": 0.0, "z": 2.0}
-            self.get_logger().info("🎮 DECOLAGEM COMPLETA! Modo de controle por gestos ATIVADO!")
+            self.get_logger().info(" DECOLAGEM COMPLETA! Modo de controle por gestos ATIVADO!")
             self.get_logger().info("Agora você pode usar gestos para controlar o drone:")
-            self.get_logger().info("- forward/back/left/right para movimento")
-            self.get_logger().info("- up/down para altitude")
-            self.get_logger().info("- return para voltar à origem")
-            self.get_logger().info("- land para pousar")
+            self.get_logger().info("- forward/back/left/right para movimento com velocidade")
+            self.get_logger().info("- up/down para altitude com velocidade")
+            self.get_logger().info("- hold para parar movimento")
+            self.get_logger().info("- land/return/arm/disarm para comandos de veículo")
 
     def send_arm_command(self):
         """Send ARM command (delayed)"""
