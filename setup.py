@@ -19,7 +19,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'mission = uav_mission.mission:main'
+            'mission = uav_mission.mission:main',
+            'fase3 = uav_mission.fase3:main'
         ],
     },
 )
