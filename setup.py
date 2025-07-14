@@ -20,7 +20,8 @@ setup(
     entry_points={
         'console_scripts': [
             'mission = uav_mission.mission:main',
-            'fase1 = uav_mission.fase1:main'
+            'fase1 = uav_mission.fase1:main',
+            'fase3_gesture = uav_mission.fase3_gesture_control:main'
         ],
     },
 )
