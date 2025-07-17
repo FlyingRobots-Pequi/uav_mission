@@ -43,6 +43,7 @@ class MissionNode(Node):
         # Monitoramento de bateria
         from uav_interfaces.msg import UavStatus
         self.battery_returned = False
+        self.battery_landed = False  # Novo flag para pouso de emergência
         self.uav_status_sub = self.create_subscription(
             UavStatus,
             self._build_uav_topic('/uav_status'),
@@ -398,11 +399,19 @@ class MissionNode(Node):
         battery = self.get_battery_percentage(msg.status_summary)
         if battery is not None:
             self.get_logger().info(f"Bateria atual: {battery}%")
-            if battery <= 20 and not self.battery_returned:
+            if battery <= 10 and not self.battery_landed:
+                self.battery_landed = True
+                self.get_logger().warn("Bateria crítica! Pousando imediatamente...")
+                land_command = {"command": "LAND"}
+                msg_land = self.create_mission_command(land_command)
+                self.mission_cmd_pub.publish(msg_land)
+                self.get_logger().info("Comando LAND enviado devido à bateria crítica!")
+            elif battery <= 20 and not self.battery_returned and not self.battery_landed:
                 self.battery_returned = True
                 self.return_to_origin()
             elif battery > 20:
                 self.battery_returned = False
+                self.battery_landed = False
         else:
             self.get_logger().warn("Não consegui extrair a porcentagem de bateria.")
 
@@ -417,6 +426,11 @@ class MissionNode(Node):
         msg = self.create_mission_command(command)
         self.mission_cmd_pub.publish(msg)
         self.get_logger().info("Comando de retorno enviado!")
+        # Após retornar à origem, pousa
+        land_command = {"command": "LAND"}
+        msg_land = self.create_mission_command(land_command)
+        self.mission_cmd_pub.publish(msg_land)
+        self.get_logger().info("Comando LAND enviado após retorno à origem!")
 
 def main(args=None):
     rclpy.init(args=args)
