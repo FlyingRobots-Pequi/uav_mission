@@ -3,6 +3,7 @@ from rclpy.node import Node
 import time
 from geometry_msgs.msg import PoseStamped, PoseArray
 from uav_interfaces.msg import MissionCommand, MissionState
+import re
 
 
 class MissionNode(Node):
@@ -36,6 +37,16 @@ class MissionNode(Node):
             PoseArray,
             '/unique_positions',
             self.unique_positions_callback,
+            10
+        )
+
+        # Monitoramento de bateria
+        from uav_interfaces.msg import UavStatus
+        self.battery_returned = False
+        self.uav_status_sub = self.create_subscription(
+            UavStatus,
+            self._build_uav_topic('/uav_status'),
+            self.battery_callback,
             10
         )
 
@@ -375,6 +386,37 @@ class MissionNode(Node):
             else:
                 self.get_logger().error("Parando missão devido a falha.")
                 self.waiting_for_response = False
+
+    def get_battery_percentage(self, status_summary):
+        match = re.search(r'Battery: (\d+(?:\.\d+)?)%', status_summary)
+        if match:
+            return float(match.group(1))
+        return None
+
+    def battery_callback(self, msg):
+        self.get_logger().debug(f"Battery callback recebido - status_summary: {msg.status_summary}")
+        battery = self.get_battery_percentage(msg.status_summary)
+        if battery is not None:
+            self.get_logger().info(f"Bateria atual: {battery}%")
+            if battery <= 20 and not self.battery_returned:
+                self.battery_returned = True
+                self.return_to_origin()
+            elif battery > 20:
+                self.battery_returned = False
+        else:
+            self.get_logger().warn("Não consegui extrair a porcentagem de bateria.")
+
+    def return_to_origin(self):
+        self.get_logger().warn("Bateria baixa! Retornando para origem...")
+        command = {
+            "command": "GOTO",
+            "x": 0.0,
+            "y": 0.0,
+            "z": 2.0
+        }
+        msg = self.create_mission_command(command)
+        self.mission_cmd_pub.publish(msg)
+        self.get_logger().info("Comando de retorno enviado!")
 
 def main(args=None):
     rclpy.init(args=args)
