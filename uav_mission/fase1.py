@@ -1,9 +1,9 @@
 import rclpy
 from rclpy.node import Node
 import time
-from geometry_msgs.msg import PoseStamped, PoseArray
+from geometry_msgs.msg import PoseStamped, PoseArray, Point
 from uav_interfaces.msg import MissionCommand, MissionState
-
+from std_msgs.msg import Bool
 
 class MissionNode(Node):
     def __init__(self):
@@ -34,8 +34,26 @@ class MissionNode(Node):
         # Subscriber para bases detectadas
         self.unique_positions_sub = self.create_subscription(
             PoseArray,
-            '/unique_positions',
+            '/base_detection/unique_positions',
             self.unique_positions_callback,
+            10
+        )
+
+        # Assinar `/base_detection/has_base`
+        self.has_base = False
+        self.has_base_sub = self.create_subscription(
+            Bool,
+            '/base_detection/has_base',
+            self.has_base_callback,
+            10
+        )
+
+        # Assinar `/base_detection/delta_points`
+        self.base_delta = Point()
+        self.delta_sub = self.create_subscription(
+            Point,
+            '/base_detection/delta_points',
+            self.delta_callback,
             10
         )
 
@@ -45,6 +63,7 @@ class MissionNode(Node):
         
         # Controle de bases detectadas
         self.detected_bases = []
+        self.bases_to_visit = []
         self.bases_received = False
         self.current_base_index = 0
         self.visiting_bases = False
@@ -102,7 +121,7 @@ class MissionNode(Node):
 
     def unique_positions_callback(self, msg: PoseArray):
         """Callback para receber bases detectadas do sistema base_detection"""
-        if len(msg.poses) >= 3:  # Pelo menos 3 bases detectadas
+        if len(msg.poses) >= 1:  # Pelo menos 1 base detectada
             self.detected_bases = []
             for i, pose in enumerate(msg.poses):
                 base = {
@@ -119,6 +138,17 @@ class MissionNode(Node):
                 self.get_logger().info(f"Altitude de aproximação: {self.approach_altitude:.1f}m")
                 for base in self.detected_bases:
                     self.get_logger().info(f"   Base {base['id']}: ({base['x']:.3f}, {base['y']:.3f})")
+
+    def has_base_callback(self, msg):
+        self.has_base = msg.data
+
+    def delta_callback(self, msg):
+        self.base_delta = msg
+
+    def is_centralized(self, threshold=0.1):
+        dx = self.base_delta.x
+        dy = self.base_delta.y
+        return abs(dx) < threshold and abs(dy) < threshold
 
     def create_mission_command(self, command_dict):
         """Cria uma mensagem MissionCommand a partir do dicionário"""
@@ -196,6 +226,17 @@ class MissionNode(Node):
             self.passeando_arena = False
             self.mission_index += 1  # Próximo comando (VISIT_DETECTED_BASES)
             self.get_logger().info("Passeio pela arena completo! Iniciando visitação das bases...")
+
+            # Congela as bases detectadas para visitação
+            if self.detected_bases:
+                self.bases_to_visit = [base.copy() for base in self.detected_bases]
+                self.get_logger().info(f"Bases detectadas após passeio pela arena ({len(self.bases_to_visit)}):")
+                for base in self.bases_to_visit:
+                    self.get_logger().info(f"   Base {base['id']}: (x={base['x']:.3f}, y={base['y']:.3f}, z={base['z']:.3f})")
+            else:
+                self.bases_to_visit = []
+                self.get_logger().warning("Nenhuma base detectada após passeio pela arena!")
+
             self.send_next_command()
             return
 
@@ -219,7 +260,7 @@ class MissionNode(Node):
 
     def send_next_base_visit(self):
         """Lógica simplificada para visitar bases usando estados do flight_manager"""
-        if self.current_base_index >= len(self.detected_bases):
+        if self.current_base_index >= len(self.bases_to_visit):
             # Terminou de visitar todas as bases
             self.visiting_bases = False
             self.visit_step = "IDLE"
@@ -229,12 +270,12 @@ class MissionNode(Node):
             return
 
         # Pega a base atual
-        current_base = self.detected_bases[self.current_base_index]
+        current_base = self.bases_to_visit[self.current_base_index]
         
         if self.visit_step == "IDLE":
             # Inicia nova base - vai para posição
             self.visit_step = "GOTO"
-            self.get_logger().info(f"=== VISITANDO BASE {current_base['id']} ({self.current_base_index + 1}/{len(self.detected_bases)}) ===")
+            self.get_logger().info(f"=== VISITANDO BASE {current_base['id']} ({self.current_base_index + 1}/{len(self.bases_to_visit)}) ===")
             self.get_logger().info(f"[1/5] GOTO - Navegando para posição da base")
             
             goto_command = {
@@ -247,13 +288,34 @@ class MissionNode(Node):
             self.mission_cmd_pub.publish(msg)
             
         elif self.visit_step == "GOTO":
-            # Chegou na posição - inicia pouso
-            self.visit_step = "LAND"
-            self.get_logger().info(f"[2/5] LAND - Pouso automático na Base {current_base['id']}")
-            
-            land_command = {"command": "LAND"}
-            msg = self.create_mission_command(land_command)
-            self.mission_cmd_pub.publish(msg)
+            # Chegou na posição - verifica se pode pousar
+            if self.has_base and self.is_centralized():
+                print("Base centralizada.")
+                self.visit_step = "LAND"
+                self.get_logger().info(f"[2/5] LAND - Pouso automático na Base {current_base['id']}")
+                land_command = {"command": "LAND"}
+                msg = self.create_mission_command(land_command)
+                self.mission_cmd_pub.publish(msg)
+                self.waiting_for_response = True
+            else:
+                if not self.has_base:
+                    self.get_logger().warning("Base não detectada embaixo do drone! Centralizando e aguardando detecção...")
+                else:
+                    self.get_logger().warning("Drone não está centralizado sobre a base! Corrigindo posição...")
+                # Corrige posição usando delta
+                corrected_x = current_base["x"] + self.base_delta.x
+                corrected_y = current_base["y"] + self.base_delta.y
+                goto_command = {
+                    "command": "GOTO",
+                    "x": corrected_x,
+                    "y": corrected_y,
+                    "z": self.approach_altitude
+                }
+                msg = self.create_mission_command(goto_command)
+                self.mission_cmd_pub.publish(msg)
+                # Aguarda um tempo antes de tentar de novo
+                self.create_timer(1.0, self.send_next_base_visit)
+                self.waiting_for_response = True
             
         elif self.visit_step == "LAND":
             # Pousou e desarmou - volta ao offboard
